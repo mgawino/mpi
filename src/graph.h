@@ -5,10 +5,8 @@
 
 typedef struct {
     int ** outEdges;
-    int ** outEdgesProc;
     int * outDegrees;
     int ** inEdges;
-    int ** inEdgesProc;
     int * inDegrees;
     int * ordering;
     int * parents;

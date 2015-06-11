@@ -12,25 +12,11 @@ void printGraph(Graph* g) {
 			printf("%d ", g->outEdges[i][j]);
 		}
 		printf("\n");
-		if (g->outEdgesProc[i] != NULL) {
-			printf("Processes: ");
-			for (int j = 0; j < g->outDegrees[i]; j++) {
-				printf("%d ", g->outEdgesProc[i][j]);
-			}
-			printf("\n");
-		}
 		printf("Node %d <-- [%d]: ", i, g->inDegrees[i]);
 		for (int j = 0; j < g->inDegrees[i]; j++) {
 			printf("%d ", g->inEdges[i][j]);
 		}
 		printf("\n");
-		if (g->inEdgesProc[i] != NULL) {
-			printf("Processes: ");
-			for (int j = 0; j < g->inDegrees[i]; j++) {
-				printf("%d ", g->inEdgesProc[i][j]);
-			}
-			printf("\n");
-		}
 	}
     if (g->parents != NULL) {
     	printf("Graph parents:\n");
@@ -100,8 +86,6 @@ Graph* readGraph(FILE* file) {
     g->outDegrees = safeMalloc((g->nodesCount + 1) * sizeof(int));
     g->inDegrees = safeMalloc((g->nodesCount + 1) * sizeof(int));
     g->nodesMapping = NULL;
-    g->outEdgesProc = NULL;
-    g->inEdgesProc = NULL;
     memset(g->outDegrees, 0, (g->nodesCount + 1) * sizeof(int));
     memset(g->inDegrees, 0, (g->nodesCount + 1) * sizeof(int));
     while ((fgets(line, sizeof line, file) != NULL) && !isLineEmpty(line)) {
@@ -143,14 +127,8 @@ void freeGraph(Graph *g) {
 		if (g->inDegrees[i] > 0) {
 			free(g->inEdges[i]);
 		}
-		if (g->inEdgesProc != NULL && g->inEdgesProc[i] != NULL) {
-			free(g->inEdgesProc[i]);
-		}
 		if (g->outDegrees[i] > 0) {
 			free(g->outEdges[i]);
-		}
-		if (g->outEdgesProc != NULL && g->outEdgesProc[i] != NULL) {
-			free(g->outEdgesProc[i]);
 		}
 	}
 	if (g->ordering != NULL) {
@@ -161,12 +139,6 @@ void freeGraph(Graph *g) {
 	}
 	if (g->nodesMapping != NULL) {
 		free(g->nodesMapping);
-	}
-	if (g->outEdgesProc != NULL) {
-		free(g->outEdgesProc);
-	}
-	if (g->inEdgesProc != NULL) {
-		free(g->inEdgesProc);
 	}
 	free(g->inEdges);
 	free(g->outEdges);

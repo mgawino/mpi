@@ -15,10 +15,15 @@
 
 #define MPI_NODE_IN_OUT_INFO 71
 #define MPI_NODE_OUT_NEIGH 72
-#define MPI_NODE_OUT_NEIGH_PROC 73
 
 #define MPI_NODE_IN_INFO 74
 #define MPI_NODE_IN_NEIGH 75
+
+#define MPI_END_DISTRIBUTION 100
+#define MPI_MATCH 101
+#define MPI_LAST_SEND_COMPLETE 102
+#define MPI_END_COMPUTATION 103
+#define MPI_MATCH_FOUND 104
 
 typedef struct {
     int matchedNodesCount;
@@ -37,7 +42,6 @@ typedef struct {
 
 typedef struct {
 	int nodesWithOutEdges;
-	int nodesWithOnlyInEdges;
 	int nodesCount;
 	int memory;
 } ProcInfo;
@@ -62,13 +66,6 @@ FILE * checkArgs(int argc, char* argv[]) {
 }
 
 // ---------------------- matching ------------------------------------
-
-void printMatch(Match* match) {
-    for (int i = 1; i <= match->matchedNodesCount; i++) {
-       printf("%d ", match->matchedNodes[i]);
-    }
-    printf("\n");
-}
 
 void printArray(int * tab, int len) {
 	for (int i = 1; i <= len; i++) {
@@ -121,9 +118,25 @@ bool checkNodeMatches(int graphNode, int patternNode, Graph* graph, Graph* patte
     return true;
 }
 
-void exploreMatch(Graph* graph, Graph* pattern, Match * match) {
+void exploreReceivedMatch(Graph * graph, Graph * pattern, int * nodeProcMap, int rank, Match * match, MPI_Request * lastSendRequest);
+
+void tryReceive(Graph * graph, Graph * pattern, int * nodeProcMap, int rank, MPI_Request * lastSendRequest) {
+	int count, flag;
+	MPI_Status recvStatus;
+	MPI_Iprobe(MPI_ANY_SOURCE, MPI_MATCH, MPI_COMM_WORLD, &flag, &recvStatus);
+	if (flag) {
+		MPI_Get_count(&recvStatus, MPI_INT, &count);
+		Match match;
+		match.matchedNodesCount = count - 1;
+		MPI_Recv(&match.matchedNodes, count, MPI_INT, MPI_ANY_SOURCE, MPI_MATCH, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
+		exploreReceivedMatch(graph, pattern, nodeProcMap, rank, &match, lastSendRequest);
+	}
+}
+
+void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Match * match, MPI_Request * lastSendRequest) {
     if (match->matchedNodesCount == pattern->nodesCount) {
-        printMatch(match);
+    	printf("MATCH\n");
+    	MPI_Send(match->matchedNodes, match->matchedNodesCount + 1, MPI_INT, ROOT, MPI_MATCH_FOUND, MPI_COMM_WORLD);
         match->matchedNodesCount--;
         return;
     }
@@ -135,24 +148,65 @@ void exploreMatch(Graph* graph, Graph* pattern, Match * match) {
     int * parentEdges = nextPatternNode < 0 ? graph->inEdges[nextGraphNodeParentIndex] : graph->outEdges[nextGraphNodeParentIndex];
     int parentEdgesCount = nextPatternNode < 0 ? graph->inDegrees[nextGraphNodeParentIndex] : graph->outDegrees[nextGraphNodeParentIndex];
 
+    int canSend = 1;
+    MPI_Request sendRequest;
+    int sendBuffer[MAX_MATCH_SIZE + 1];
     for (int i = 0; i < parentEdgesCount; i++) {
+    	tryReceive(graph, pattern, nodeProcMap, rank, lastSendRequest);
         int nextGraphNode = parentEdges[i];
-        if (checkNodeMatches(nextGraphNode, abs(nextPatternNode), graph, pattern, match)) {
-        	match->matchedNodes[++match->matchedNodesCount] = nextGraphNode;
-        	exploreMatch(graph, pattern, match);
+        int nextGraphNodeProc = nodeProcMap[nextGraphNode];
+        if (nextGraphNodeProc == rank) {
+        	if (checkNodeMatches(nextGraphNode, abs(nextPatternNode), graph, pattern, match)) {
+        		match->matchedNodes[++match->matchedNodesCount] = nextGraphNode;
+        		exploreMatch(graph, pattern, nodeProcMap, rank, match, lastSendRequest);
+        	}
+        } else {
+        	while(!canSend) {
+        		MPI_Test(&sendRequest, &canSend, MPI_STATUSES_IGNORE);
+        		tryReceive(graph, pattern, nodeProcMap, rank, lastSendRequest);
+        	}
+        	match->matchedNodes[0] = nextGraphNode;
+        	memcpy(sendBuffer, match->matchedNodes, (match->matchedNodesCount + 1) * sizeof(int));
+        	MPI_Isend(sendBuffer, match->matchedNodesCount + 1, MPI_INT, nextGraphNodeProc, MPI_MATCH, MPI_COMM_WORLD, &sendRequest);
+        	*lastSendRequest = sendRequest;
+        	canSend = 0;
         }
     }
     match->matchedNodesCount--;
 }
 
-void findMatches(Graph *graph, Graph* pattern) {
+void exploreReceivedMatch(Graph * graph, Graph * pattern, int * nodeProcMap, int rank, Match * match, MPI_Request * lastSendRequest) {
+	int nextGraphNode = match->matchedNodes[0];
+	int nextPatternNode = pattern->ordering[match->matchedNodesCount + 1];
+	if (checkNodeMatches(nextGraphNode, abs(nextPatternNode), graph, pattern, match)) {
+		match->matchedNodes[++match->matchedNodesCount] = nextGraphNode;
+		exploreMatch(graph, pattern, nodeProcMap, rank, match, lastSendRequest);
+	}
+}
+
+void findMatches(Graph *graph, Graph* pattern, int * nodeProcMap, int rank) {
+	MPI_Request lastSendRequest = MPI_REQUEST_NULL;
 	for (int i = 1; i <= graph->nodesCount; i++) {
 		Match match;
 		memset(match.matchedNodes, -1, (MAX_MATCH_SIZE + 1) * sizeof(int));
 		match.matchedNodesCount = 1;
 		match.matchedNodes[1] = graph->nodesMapping[i];
-		exploreMatch(graph, pattern, &match);
+		exploreMatch(graph, pattern, nodeProcMap, rank, &match, &lastSendRequest);
 	}
+	int compleated = lastSendRequest == MPI_REQUEST_NULL;
+	MPI_Request request, dummyRequest;
+	while(!compleated) {
+		MPI_Test(&lastSendRequest, &compleated, MPI_STATUSES_IGNORE);
+		tryReceive(graph, pattern, nodeProcMap, rank, &dummyRequest);
+	}
+	MPI_Isend(NULL, 0, MPI_INT, ROOT, MPI_LAST_SEND_COMPLETE, MPI_COMM_WORLD, &request);
+	MPI_Request_free(&request);
+	int end = 0;
+	while(!end) {
+		MPI_Iprobe(ROOT, MPI_END_COMPUTATION, MPI_COMM_WORLD, &end, MPI_STATUSES_IGNORE);
+		tryReceive(graph, pattern, nodeProcMap, rank, &dummyRequest);
+	}
+	MPI_Recv(NULL, 0, MPI_INT, ROOT, MPI_END_COMPUTATION, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
 }
 
 
@@ -190,17 +244,16 @@ int compare (const void * a, const void * b) {
 	return 1;
 }
 
-ProcInfo * assignNodesToProcesses(int nodesCount, int processesNum, NodeInfo * nodeInfo, int ** nodeProcMap) {
-	ProcInfo * procInfo = (ProcInfo *) malloc(processesNum * sizeof(ProcInfo));
-	for (int i = 1; i < processesNum; i++) {
-		procInfo[i].memory = 500000;
+ProcInfo * assignNodesToProcesses(int nodesCount, int procNum, NodeInfo * nodeInfo, int ** nodeProcMap) {
+	ProcInfo * procInfo = (ProcInfo *) safeMalloc(procNum * sizeof(ProcInfo));
+	for (int i = 1; i < procNum; i++) {
+		procInfo[i].memory = 500000000;
 		procInfo[i].nodesWithOutEdges = 0;
-		procInfo[i].nodesWithOnlyInEdges = 0;
 		procInfo[i].nodesCount = 0;
 	}
 	*nodeProcMap = malloc((nodesCount + 1) * sizeof(int));
 	memset(*nodeProcMap, -1, (nodesCount + 1) * sizeof(int));
-	NodeComp * nodeComp = (NodeComp *) malloc(nodesCount * sizeof(NodeComp));
+	NodeComp * nodeComp = (NodeComp *) safeMalloc(nodesCount * sizeof(NodeComp));
 	for (int i = 1; i <= nodesCount; i++) {
 		nodeComp[i-1].sumDegrees = nodeInfo[i].inDegree + nodeInfo[i].outDegree;
 		nodeComp[i-1].node = i;
@@ -211,26 +264,22 @@ ProcInfo * assignNodesToProcesses(int nodesCount, int processesNum, NodeInfo * n
 	int i = 1;
 	while (i <= nodesCount) {
 		int node = nodeComp[i-1].node;
-		if ((nodeInfo[i].inDegree == 0) && (nodeInfo[i].outDegree == 0)) {
-			i++;
-			continue;
-		} else if (nodeComp[i-1].sumDegrees * 4 < procInfo[proc].memory) {
+		if (nodeComp[i-1].sumDegrees * 8 + 8 < procInfo[proc].memory) {
 			(*nodeProcMap)[node] = proc;
-			procInfo[proc].memory -= nodeComp[i-1].sumDegrees * 4;
+			procInfo[proc].memory -= (nodeComp[i-1].sumDegrees * 8 + 8);
 			if (nodeInfo[node].outDegree > 0) {
 				procInfo[proc].nodesWithOutEdges++;
-			}
-			if ((nodeInfo[node].inDegree > 0) && (nodeInfo[node].outDegree == 0)) {
-				procInfo[proc].nodesWithOnlyInEdges++;
 			}
 			procInfo[proc].nodesCount++;
 			i++;
 		}
 		proc += direction;
-		if (proc == processesNum) {
+		if (proc == procNum) {
 			direction = -1;
-		} else if (proc == 1) {
+			proc--;
+		} else if (proc == 0) {
 			direction = 1;
+			proc++;
 		}
 	}
 	free(nodeComp);
@@ -266,8 +315,6 @@ Graph * gatherPattern() {
 	pattern->parents = safeMalloc((pattern->nodesCount + 1) * sizeof(int));
 	pattern->ordering = safeMalloc((pattern->nodesCount + 1) * sizeof(int));
 	pattern->nodesMapping = NULL;
-	pattern->inEdgesProc = NULL;
-	pattern->outEdgesProc = NULL;
 	MPI_Bcast(pattern->outDegrees, pattern->nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
 	MPI_Bcast(pattern->inDegrees, pattern->nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
 	MPI_Bcast(pattern->parents, pattern->nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
@@ -295,13 +342,12 @@ void distribiuteGraph(FILE * file, int *nodeProcMap, NodeInfo * nodeInfo, ProcIn
 	int nodesCount, receivier;
 	int * neighbours, * neighboursProc;
 	char line[64];
-	// Sending input and output info about nodes to all processes
-	int procInOutInfo[3];
+	// Sending info about nodes to all processes
+	int procInOutInfo[2];
 	for (int i = 1; i < procNum; i++) {
 		procInOutInfo[0] = procInfo[i].nodesWithOutEdges;
-		procInOutInfo[1] = procInfo[i].nodesWithOnlyInEdges;
-		procInOutInfo[2] = procInfo[i].nodesCount;
-		MPI_Send(procInOutInfo, 3, MPI_INT, i, MPI_PROC_IN_OUT_INFO, MPI_COMM_WORLD);
+		procInOutInfo[1] = procInfo[i].nodesCount;
+		MPI_Send(procInOutInfo, 2, MPI_INT, i, MPI_PROC_IN_OUT_INFO, MPI_COMM_WORLD);
 	}
 	int nodeInOutInfo[3];
 	fscanf(file, "%d\n", &nodesCount);
@@ -319,12 +365,11 @@ void distribiuteGraph(FILE * file, int *nodeProcMap, NodeInfo * nodeInfo, ProcIn
 				neighboursProc[i] = nodeProcMap[neighbours[i]];
 			}
 			MPI_Send(neighbours, nodeInOutInfo[1], MPI_INT, receivier, MPI_NODE_OUT_NEIGH, MPI_COMM_WORLD);
-			MPI_Send(neighboursProc, nodeInOutInfo[1], MPI_INT, receivier, MPI_NODE_OUT_NEIGH_PROC, MPI_COMM_WORLD);
 	}
-	// Sending info of nodes with only input edges
+	// Sending info of nodes without output edges
 	int nodeInInfo[2];
 	for (int i = 1; i <= nodesCount; i++) {
-		if ((nodeInfo[i].inDegree > 0) && (nodeInfo[i].outDegree == 0)) {
+		if (nodeInfo[i].outDegree == 0) {
 			nodeInInfo[0] = i;
 			nodeInInfo[1] = nodeInfo[i].inDegree;
 			// Sending: node, inDegree
@@ -337,22 +382,20 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 	Graph * g = safeMalloc(sizeof(Graph));
 	*inNodes = 0;
 	*outNodes = 0;
-	int procInOutInfo[3];
-	// Receiving: nodesWithOutEdges, nodesWithOnlyInEdges, nodesCount
-	MPI_Recv(procInOutInfo, 3, MPI_INT, ROOT, MPI_PROC_IN_OUT_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	int procInOutInfo[2];
+	// Receiving: nodesWithOutEdges, nodesCount
+	MPI_Recv(procInOutInfo, 2, MPI_INT, ROOT, MPI_PROC_IN_OUT_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 	int nodesWithOutEdges = procInOutInfo[0];
-	int nodesWithOnlyInEdges = procInOutInfo[1];
+	int nodesCount = procInOutInfo[1];
 
-	g->nodesCount = procInOutInfo[2];
-	g->nodesMapping = safeMalloc((g->nodesCount + 1) * sizeof(int));
+	g->nodesCount = nodesCount;
+	g->nodesMapping = safeMalloc((nodesCount + 1) * sizeof(int));
 
-	g->outDegrees = safeMalloc((g->nodesCount + 1) * sizeof(int));
-	g->outEdges = safeMalloc((g->nodesCount + 1) * sizeof(int*));
-	g->outEdgesProc = safeMalloc((g->nodesCount + 1) * sizeof(int*));
+	g->outDegrees = safeMalloc((nodesCount + 1) * sizeof(int));
+	g->outEdges = safeMalloc((nodesCount + 1) * sizeof(int*));
 
-	g->inDegrees = safeMalloc((g->nodesCount + 1) * sizeof(int));
-	g->inEdges = safeMalloc((g->nodesCount + 1) * sizeof(int*));
-	g->inEdgesProc = safeMalloc((g->nodesCount + 1) * sizeof(int*));
+	g->inDegrees = safeMalloc((nodesCount + 1) * sizeof(int));
+	g->inEdges = safeMalloc((nodesCount + 1) * sizeof(int*));
 
 	int nodeIndex;
 	// Receiving: node, outDegree, inDegree
@@ -369,22 +412,18 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 		g->nodesMapping[nodeIndex] = node;
 		g->outDegrees[nodeIndex] = outDegree;
 		g->outEdges[nodeIndex] = safeMalloc(outDegree * sizeof(int));
-		g->outEdgesProc[nodeIndex] = safeMalloc(outDegree * sizeof(int));
 
 		g->inDegrees[nodeIndex] = inDegree;
 		if (inDegree > 0) {
 			g->inEdges[nodeIndex] = safeMalloc(inDegree * sizeof(int));
-			g->inEdgesProc[nodeIndex] = safeMalloc(inDegree * sizeof(int));
 		} else {
 			g->inEdges[nodeIndex] = NULL;
-			g->inEdgesProc[nodeIndex] = NULL;
 		}
 		MPI_Recv(g->outEdges[nodeIndex], nodeInOutInfo[1], MPI_INT, ROOT, MPI_NODE_OUT_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		MPI_Recv(g->outEdgesProc[nodeIndex], nodeInOutInfo[1], MPI_INT, ROOT, MPI_NODE_OUT_NEIGH_PROC, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 	}
-	// Receiving info about nodes with only input edges
+	// Receiving info about nodes without output edges
 	int nodeInInfo[2];
-	for (int i = 0; i < nodesWithOnlyInEdges; i++) {
+	for (int i = 0; i < (nodesCount - nodesWithOutEdges); i++) {
 		// Receive: node, inDegree
 		MPI_Recv(&nodeInInfo, 2, MPI_INT, ROOT, MPI_NODE_IN_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		int node = nodeInInfo[0];
@@ -392,19 +431,21 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 
 		g->outDegrees[nodeIndex] = 0;
 		g->outEdges[nodeIndex] = NULL;
-		g->outEdgesProc[nodeIndex] = NULL;
-
 		g->nodesMapping[nodeIndex] = node;
-		g->inDegrees[nodeIndex] = inDegree;
-		g->inEdges[nodeIndex] = safeMalloc(inDegree * sizeof(int));
-		g->inEdgesProc[nodeIndex] = safeMalloc(inDegree * sizeof(int));
+		if (inDegree > 0) {
+			g->inDegrees[nodeIndex] = inDegree;
+			g->inEdges[nodeIndex] = safeMalloc(inDegree * sizeof(int));
+		} else {
+			g->inDegrees[nodeIndex] = 0;
+			g->inEdges[nodeIndex] = NULL;
+		}
 		*inNodes += inDegree;
 		nodeIndex++;
 	}
 	return g;
 }
 
-void transpose(Graph * g, int inNodes, int outNodes, int rank) {
+void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank) {
 	int * counters = safeMalloc((g->nodesCount + 1) * sizeof(int));
 	int * nodeInInfo = safeMalloc(outNodes * 3 * sizeof(int));
 	int msgCounter = 0;
@@ -417,56 +458,97 @@ void transpose(Graph * g, int inNodes, int outNodes, int rank) {
 			nodeInInfo[msgCounter + 1] = node;
 			nodeInInfo[msgCounter + 2] = rank;
 			// Sending outNode, node, rank
-			MPI_Isend(nodeInInfo + msgCounter, 3, MPI_INT, g->outEdgesProc[i][j],
-					  MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
+			MPI_Isend(nodeInInfo + msgCounter, 3, MPI_INT, nodeProcMap[g->outEdges[i][j]], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
 			MPI_Request_free(&request);
 			msgCounter += 3;
 		}
 	}
+
 	// Receiving input edges
 	int result[3];
 	for (int i = 0; i < inNodes; i++) {
 		MPI_Recv(&result, 3, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		int source = findIndex(g->nodesMapping, g->nodesCount, result[0]);
-		g->inEdges[source][counters[source]] = result[1];
-		g->inEdgesProc[source][counters[source]] = result[2];
-		counters[source]++;
+		g->inEdges[source][counters[source]++] = result[1];
 	}
 	free(nodeInInfo);
 	free(counters);
 }
 
-void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern) {
+void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern, int ** nodeProcMap, int * patternSize) {
+	int nodesCount;
 	if (rank == ROOT) {
-		int nodesCount;
-		int * nodeProcMap;
-		FILE * file = checkArgs(argc, argv);
 		double startTime = MPI_Wtime();
+		FILE * file = checkArgs(argc, argv);
 		NodeInfo * nodeInfo = preprocessGraph(file, &nodesCount);
-		printf("Preprocessing time: %f\n", MPI_Wtime() - startTime);
-		ProcInfo * procInfo = assignNodesToProcesses(nodesCount, procNum, nodeInfo, &nodeProcMap);
+		ProcInfo * procInfo = assignNodesToProcesses(nodesCount, procNum, nodeInfo, nodeProcMap);
+		// Brodcast node --> process mapping
+		printf("Node assign time: %f\n", MPI_Wtime() - startTime);
+		MPI_Bcast(&nodesCount, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+		MPI_Bcast(*nodeProcMap, nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+		printf("Proc map brodcast time: %f\n", MPI_Wtime() - startTime);
+		// Distribute pattern
 		*pattern = readGraph(file);
-		fseek(file, 0, SEEK_SET);
+		*patternSize = (*pattern)->nodesCount;
 		distribiutePattern(*pattern);
 		freeGraph(*pattern);
-		distribiuteGraph(file, nodeProcMap, nodeInfo, procInfo, procNum);
+		// Distribiute graph
+		fseek(file, 0, SEEK_SET);
+		distribiuteGraph(file, *nodeProcMap, nodeInfo, procInfo, procNum);
+		// Free arrays
 		free(procInfo);
 		free(nodeInfo);
-		free(nodeProcMap);
+		free(*nodeProcMap);
 		fclose(file);
+
+		// Check if all processes ends - TO REMOVE!!!
+		printf("Graph sent time: %f\n", MPI_Wtime() - startTime);
+		MPI_Gather(NULL, 0, MPI_INT, NULL, 0, MPI_INT, ROOT, MPI_COMM_WORLD);
 		printf("Distribution time: %f\n", MPI_Wtime() - startTime);
 	} else {
-		int inNodes, outNodes;
+		// Receive node --> process mapping
+		MPI_Bcast(&nodesCount, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+		*nodeProcMap = safeMalloc((nodesCount + 1) * sizeof(int));
+		MPI_Bcast(*nodeProcMap, nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+		// Receive pattern
 		*pattern = gatherPattern();
+		// Receive graph
+		int inNodes, outNodes;
 		*graph = gatherGraph(&inNodes, &outNodes);
-		transpose(*graph, inNodes, outNodes, rank);
+		transpose(*graph, *nodeProcMap, inNodes, outNodes, rank);
+		// Receive end of distribution
+		MPI_Request request;
+		MPI_Isend(NULL, 0, MPI_INT, ROOT, MPI_END_DISTRIBUTION, MPI_COMM_WORLD, &request);
+		MPI_Request_free(&request);
 	}
 }
 
-void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern) {
+void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nodeProcMap, int patternSize) {
 	if (rank == ROOT) {
+		int lastSendsCompleated = 0;
+		int flag;
+		int * match = malloc((patternSize + 1) * sizeof(int));
+		while(lastSendsCompleated != procNum - 1) {
+			flag = 0;
+			MPI_Iprobe(MPI_ANY_SOURCE, MPI_MATCH_FOUND, MPI_COMM_WORLD, &flag, MPI_STATUSES_IGNORE);
+			if (flag) {
+				MPI_Recv(match, patternSize + 1, MPI_INT, MPI_ANY_SOURCE, MPI_MATCH_FOUND, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
+				printArray(match, patternSize);
+				continue;
+			}
+			MPI_Iprobe(MPI_ANY_SOURCE, MPI_LAST_SEND_COMPLETE, MPI_COMM_WORLD, &flag, MPI_STATUSES_IGNORE);
+			if (flag) {
+				MPI_Recv(NULL, 0, MPI_INT, MPI_ANY_SOURCE, MPI_LAST_SEND_COMPLETE, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
+				lastSendsCompleated += 1;
+			}
+		}
+		MPI_Request request;
+		for (int i = 1; i < procNum; i++) {
+			MPI_Isend(NULL, 0, MPI_INT, i, MPI_END_COMPUTATION, MPI_COMM_WORLD, &request);
+			MPI_Request_free(&request);
+		}
 	} else {
-		findMatches(graph, pattern);
+		findMatches(graph, pattern, nodeProcMap, rank);
 	}
 }
 
@@ -476,8 +558,10 @@ int main(int argc, char* argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &procNum);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     Graph * pattern, * graph;
-    distribiute(argc, argv, rank, procNum, &graph, &pattern);
-    // matchNodes(rank, procNum, graph, pattern);
+    int * nodeProcMap;
+    int patternSize;
+    distribiute(argc, argv, rank, procNum, &graph, &pattern, &nodeProcMap, &patternSize);
+    matchNodes(rank, procNum, graph, pattern, nodeProcMap, patternSize);
     MPI_Finalize();
     return 0;
 }
