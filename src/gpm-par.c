@@ -36,7 +36,7 @@ typedef struct {
 
 typedef struct {
 	int node;
-	int sumDegrees;
+	int val;
 } NodeComp;
 
 typedef struct {
@@ -47,21 +47,26 @@ typedef struct {
 
 // ------------------ utils ----------------------------
 
-FILE * checkArgs(int argc, char* argv[]) {
+void checkArgs(int argc, char* argv[], FILE ** inFile, FILE ** outFile) {
     if (argc != 3) {
     	fprintf(stderr, "ERROR: files not specified\n");
         MPI_Finalize();
         exit(1);
     }
-    FILE* file;
-    file = fopen(argv[1], "r");
-    if (file == NULL) {
+    *inFile = fopen(argv[1], "r");
+    if (*inFile == NULL) {
     	fprintf(stderr, "ERROR: file not found %s\n", argv[1]);
-    	fclose(file);
+    	fclose(*inFile);
     	MPI_Finalize();
     	exit(1);
     }
-    return file;
+    *outFile = fopen(argv[2], "w+");
+    if (*outFile == NULL) {
+		fprintf(stderr, "ERROR: file not found %s\n", argv[2]);
+		fclose(*outFile);
+		MPI_Finalize();
+		exit(1);
+    }
 }
 
 // ---------------------- matching ------------------------------------
@@ -71,6 +76,13 @@ void printArray(int * tab, int len) {
 		printf("%d ", tab[i]);
 	}
 	printf("\n");
+}
+
+void writeMatch(int * match, int len, FILE * outFile) {
+	for (int i = 1; i < len; i++) {
+		fprintf(outFile, "%d ", match[i]);
+	}
+	fprintf(outFile, "%d\n", match[len]);
 }
 
 bool matchContains(int node, Match* match) {
@@ -284,12 +296,13 @@ NodeInfo * preprocessGraph(FILE * file, int * nodesCount) {
 int compare (const void * a, const void * b) {
 	NodeComp * node1 = (NodeComp *) a;
 	NodeComp * node2 = (NodeComp *) b;
-	if(node1->sumDegrees < node2->sumDegrees) {
-		return -1;
-	} else if(node1->sumDegrees == node2->sumDegrees) {
-		return 0;
-	}
-	return 1;
+	return node1->val - node2->val;
+}
+
+int int_compare(const void *a, const void *b) {
+    int *val1 = (int *)a;
+    int *val2 = (int *)b;
+    return (*val1) - (*val2);
 }
 
 ProcInfo * assignNodesToProcesses(int nodesCount, int procNum, NodeInfo * nodeInfo, int ** nodeProcMap) {
@@ -303,7 +316,7 @@ ProcInfo * assignNodesToProcesses(int nodesCount, int procNum, NodeInfo * nodeIn
 	memset(*nodeProcMap, -1, (nodesCount + 1) * sizeof(int));
 	NodeComp * nodeComp = (NodeComp *) safeMalloc(nodesCount * sizeof(NodeComp));
 	for (int i = 1; i <= nodesCount; i++) {
-		nodeComp[i-1].sumDegrees = nodeInfo[i].inDegree + nodeInfo[i].outDegree;
+		nodeComp[i-1].val = nodeInfo[i].inDegree + nodeInfo[i].outDegree;
 		nodeComp[i-1].node = i;
 	}
 	qsort(nodeComp, nodesCount, sizeof(NodeComp), compare);
@@ -312,9 +325,9 @@ ProcInfo * assignNodesToProcesses(int nodesCount, int procNum, NodeInfo * nodeIn
 	int i = 1;
 	while (i <= nodesCount) {
 		int node = nodeComp[i-1].node;
-		if (nodeComp[i-1].sumDegrees * 8 + 8 < procInfo[proc].memory) {
+		if (nodeComp[i-1].val * 8 + 8 < procInfo[proc].memory) {
 			(*nodeProcMap)[node] = proc;
-			procInfo[proc].memory -= (nodeComp[i-1].sumDegrees * 8 + 8);
+			procInfo[proc].memory -= (nodeComp[i-1].val * 8 + 8);
 			if (nodeInfo[node].outDegree > 0) {
 				procInfo[proc].nodesWithOutEdges++;
 			}
@@ -426,7 +439,7 @@ void distribiuteGraph(FILE * file, int *nodeProcMap, NodeInfo * nodeInfo, ProcIn
 	}
 }
 
-Graph * gatherGraph(int * inNodes, int * outNodes) {
+Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) {
 	Graph * g = safeMalloc(sizeof(Graph));
 	*inNodes = 0;
 	*outNodes = 0;
@@ -438,6 +451,16 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 
 	g->nodesCount = nodesCount;
 	g->nodesMapping = safeMalloc((nodesCount + 1) * sizeof(int));
+	int k = 1, l = 1;
+	while (k <= nodesCount) {
+		if (nodeProcMap[l] == rank) {
+			g->nodesMapping[k] = l;
+			k++;
+		}
+		l++;
+	}
+	g->nodesMapping[0] = -1;
+	qsort(g->nodesMapping, g->nodesCount + 1, sizeof(int), int_compare);
 
 	g->outDegrees = safeMalloc((nodesCount + 1) * sizeof(int));
 	g->outEdges = safeMalloc((nodesCount + 1) * sizeof(int*));
@@ -445,10 +468,9 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 	g->inDegrees = safeMalloc((nodesCount + 1) * sizeof(int));
 	g->inEdges = safeMalloc((nodesCount + 1) * sizeof(int*));
 
-	int nodeIndex;
 	// Receiving: node, outDegree, inDegree
 	int nodeInOutInfo[3];
-	for (nodeIndex = 1; nodeIndex <= nodesWithOutEdges; nodeIndex++) {
+	for (int i = 1; i <= nodesWithOutEdges; i++) {
 		MPI_Recv(&nodeInOutInfo, 3, MPI_INT, ROOT, MPI_NODE_IN_OUT_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		int node = nodeInOutInfo[0];
 		int outDegree = nodeInOutInfo[1];
@@ -456,8 +478,7 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 
 		*outNodes += outDegree;
 		*inNodes += inDegree;
-
-		g->nodesMapping[nodeIndex] = node;
+		int nodeIndex = findIndex(g->nodesMapping, g->nodesCount, node);
 		g->outDegrees[nodeIndex] = outDegree;
 		g->outEdges[nodeIndex] = safeMalloc(outDegree * sizeof(int));
 
@@ -476,10 +497,9 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 		MPI_Recv(&nodeInInfo, 2, MPI_INT, ROOT, MPI_NODE_IN_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		int node = nodeInInfo[0];
 		int inDegree = nodeInInfo[1];
-
+		int nodeIndex = findIndex(g->nodesMapping, g->nodesCount, node);
 		g->outDegrees[nodeIndex] = 0;
 		g->outEdges[nodeIndex] = NULL;
-		g->nodesMapping[nodeIndex] = node;
 		if (inDegree > 0) {
 			g->inDegrees[nodeIndex] = inDegree;
 			g->inEdges[nodeIndex] = safeMalloc(inDegree * sizeof(int));
@@ -488,34 +508,31 @@ Graph * gatherGraph(int * inNodes, int * outNodes) {
 			g->inEdges[nodeIndex] = NULL;
 		}
 		*inNodes += inDegree;
-		nodeIndex++;
 	}
 	return g;
 }
 
 void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank) {
-	int * counters = safeMalloc((g->nodesCount + 1) * sizeof(int));
-	int * nodeInInfo = safeMalloc(outNodes * 3 * sizeof(int));
+	int * nodeInInfo = safeMalloc(outNodes * 2 * sizeof(int));
 	int msgCounter = 0;
 	MPI_Request request;
-	memset(counters, 0, (g->nodesCount + 1) * sizeof(int));
 	for (int i = 1; i <= g->nodesCount; i++) {
 		int node = g->nodesMapping[i];
 		for (int j = 0; j < g->outDegrees[i]; j++) {
 			nodeInInfo[msgCounter] = g->outEdges[i][j];
 			nodeInInfo[msgCounter + 1] = node;
-			nodeInInfo[msgCounter + 2] = rank;
 			// Sending outNode, node, rank
-			MPI_Isend(nodeInInfo + msgCounter, 3, MPI_INT, nodeProcMap[g->outEdges[i][j]], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
+			MPI_Isend(nodeInInfo + msgCounter, 2, MPI_INT, nodeProcMap[g->outEdges[i][j]], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
 			MPI_Request_free(&request);
-			msgCounter += 3;
+			msgCounter += 2;
 		}
 	}
-
+	int * counters = safeMalloc((g->nodesCount + 1) * sizeof(int));
+	memset(counters, 0, (g->nodesCount + 1) * sizeof(int));
 	// Receiving input edges
-	int result[3];
+	int result[2];
 	for (int i = 0; i < inNodes; i++) {
-		MPI_Recv(&result, 3, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(&result, 2, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		int source = findIndex(g->nodesMapping, g->nodesCount, result[0]);
 		g->inEdges[source][counters[source]++] = result[1];
 	}
@@ -523,11 +540,12 @@ void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank
 	free(counters);
 }
 
-void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern, int ** nodeProcMap, int * patternSize, double startTime) {
+void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern, int ** nodeProcMap, int * patternSize, FILE **outFile, double startTime) {
 	int nodesCount;
 	if (rank == ROOT) {
-		FILE * file = checkArgs(argc, argv);
-		NodeInfo * nodeInfo = preprocessGraph(file, &nodesCount);
+		FILE *inFile;
+		checkArgs(argc, argv, &inFile, outFile);
+		NodeInfo * nodeInfo = preprocessGraph(inFile, &nodesCount);
 		ProcInfo * procInfo = assignNodesToProcesses(nodesCount, procNum, nodeInfo, nodeProcMap);
 		// Brodcast node --> process mapping
 		printf("Node assign time: %f\n", MPI_Wtime() - startTime);
@@ -535,22 +553,24 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 		MPI_Bcast(*nodeProcMap, nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
 		printf("Proc map brodcast time: %f\n", MPI_Wtime() - startTime);
 		// Distribute pattern
-		*pattern = readGraph(file);
+		*pattern = readGraph(inFile);
 		*patternSize = (*pattern)->nodesCount;
 		distribiutePattern(*pattern);
 		freeGraph(*pattern);
 		// Distribiute graph
-		fseek(file, 0, SEEK_SET);
-		distribiuteGraph(file, *nodeProcMap, nodeInfo, procInfo, procNum);
+		fseek(inFile, 0, SEEK_SET);
+		distribiuteGraph(inFile, *nodeProcMap, nodeInfo, procInfo, procNum);
 		// Free arrays
 		free(procInfo);
 		free(nodeInfo);
 		free(*nodeProcMap);
-		fclose(file);
+		fclose(inFile);
 
 		// Check if all processes ends - TO REMOVE!!!
 		printf("Graph sent time: %f\n", MPI_Wtime() - startTime);
-		MPI_Gather(NULL, 0, MPI_INT, NULL, 0, MPI_INT, ROOT, MPI_COMM_WORLD);
+		for (int i = 1; i <= procNum - 1; i++) {
+			MPI_Recv(NULL, 0, MPI_INT, MPI_ANY_SOURCE, MPI_END_DISTRIBUTION, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
+		}
 		printf("Distribution time: %f\n", MPI_Wtime() - startTime);
 	} else {
 		// Receive node --> process mapping
@@ -561,7 +581,7 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 		*pattern = gatherPattern();
 		// Receive graph
 		int inNodes, outNodes;
-		*graph = gatherGraph(&inNodes, &outNodes);
+		*graph = gatherGraph(&inNodes, &outNodes, *nodeProcMap, rank);
 		transpose(*graph, *nodeProcMap, inNodes, outNodes, rank);
 		// Receive end of distribution
 		MPI_Request request;
@@ -570,7 +590,7 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 	}
 }
 
-void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nodeProcMap, int patternSize, double startTime) {
+void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nodeProcMap, int patternSize, FILE * outFile, double startTime) {
 	if (rank == ROOT) {
 		int flag;
 		int * match = malloc((patternSize + 1) * sizeof(int));
@@ -580,7 +600,7 @@ void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nod
 			MPI_Iprobe(MPI_ANY_SOURCE, MPI_MATCH_FOUND, MPI_COMM_WORLD, &flag, MPI_STATUSES_IGNORE);
 			if (flag) {
 				MPI_Recv(match, patternSize + 1, MPI_INT, MPI_ANY_SOURCE, MPI_MATCH_FOUND, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
-				printArray(match, patternSize);
+				writeMatch(match, patternSize, outFile);
 				continue;
 			}
 			MPI_Iprobe(MPI_ANY_SOURCE, MPI_END_COMPUTATION, MPI_COMM_WORLD, &flag, MPI_STATUSES_IGNORE);
@@ -589,6 +609,7 @@ void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nod
 				endProcesses += 1;
 			}
 		}
+		fclose(outFile);
 		for (int i = 1; i < procNum; i++) {
 			MPI_Send(NULL, 0, MPI_INT, i, MPI_END, MPI_COMM_WORLD);
 		}
@@ -607,11 +628,12 @@ int main(int argc, char* argv[]) {
     int * nodeProcMap;
     int patternSize;
     double startTime;
+    FILE * outFile;
     if (rank == ROOT) {
     	startTime = MPI_Wtime();
     }
-    distribiute(argc, argv, rank, procNum, &graph, &pattern, &nodeProcMap, &patternSize, startTime);
-    matchNodes(rank, procNum, graph, pattern, nodeProcMap, patternSize, startTime);
+    distribiute(argc, argv, rank, procNum, &graph, &pattern, &nodeProcMap, &patternSize, &outFile, startTime);
+    matchNodes(rank, procNum, graph, pattern, nodeProcMap, patternSize, outFile, startTime);
     MPI_Finalize();
     return 0;
 }

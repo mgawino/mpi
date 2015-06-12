@@ -27,10 +27,17 @@ void * safeMalloc(int size) {
 }
 
 int findIndex(int * tab, int len, int val) {
-	for (int i = 1; i <= len; i++) {
-		if (tab[i] == val) {
-			return i;
+	int left = 1, right = len, pivot;
+	while(left < right) {
+		pivot = (left + right) / 2;
+		if (tab[pivot] < val) {
+			left = pivot + 1;
+		} else {
+			right = pivot;
 		}
+	}
+	if (tab[left] == val) {
+		return left;
 	}
 	return -1;
 }
