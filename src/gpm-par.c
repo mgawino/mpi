@@ -160,7 +160,6 @@ void askForEdges(Graph * graph, int * info, int proc, int ** graphOutEdges, int 
 		MPI_Test(&request, &recv, MPI_STATUSES_IGNORE);
 		trySendEdges(graph);
 	} while(!recv);
-	MPI_Request_free(&request);
 	int out = 0, in = 0;
 	if (info[1] == 1 || info[1] == 2) {
 		MPI_Status outStatus;
