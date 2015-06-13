@@ -14,15 +14,15 @@
 #define MPI_PROC_IN_OUT_INFO 70
 #define MPI_NODE_IN_OUT_INFO 71
 #define MPI_NODE_OUT_NEIGH 72
-#define MPI_NODE_IN_INFO 74
-#define MPI_NODE_IN_NEIGH 75
-#define MPI_END_DISTRIBUTION 100
-#define MPI_END_COMPUTATION 103
-#define MPI_MATCH_FOUND 104
-#define MPI_ASK 200
-#define MPI_ASKED_OUT 201
-#define MPI_ASKED_IN 202
-#define MPI_END 203
+#define MPI_NODE_IN_INFO 73
+#define MPI_NODE_IN_NEIGH 74
+#define MPI_END_DISTRIBUTION 75
+#define MPI_END_COMPUTATION 76
+#define MPI_MATCH_FOUND 77
+#define MPI_ASK 78
+#define MPI_ASKED_OUT 79
+#define MPI_ASKED_IN 80
+#define MPI_END 81
 
 typedef struct {
     int matchedNodesCount;
@@ -44,8 +44,6 @@ typedef struct {
 	int nodesCount;
 	int memory;
 } ProcInfo;
-
-// ------------------ utils ----------------------------
 
 void checkArgs(int argc, char* argv[], FILE ** inFile, FILE ** outFile) {
     if (argc != 3) {
@@ -69,15 +67,6 @@ void checkArgs(int argc, char* argv[], FILE ** inFile, FILE ** outFile) {
     }
 }
 
-// ---------------------- matching ------------------------------------
-
-void printArray(int * tab, int len) {
-	for (int i = 1; i <= len; i++) {
-		printf("%d ", tab[i]);
-	}
-	printf("\n");
-}
-
 void writeMatch(int * match, int len, FILE * outFile) {
 	for (int i = 1; i < len; i++) {
 		fprintf(outFile, "%d ", match[i]);
@@ -94,15 +83,6 @@ bool matchContains(int node, Match* match) {
     return false;
 }
 
-bool contains(int * nodes, int nodesCount, int target) {
-    for (int i = 0; i < nodesCount; i++) {
-        if (nodes[i] == target) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int graphOutDegree,
 					  int * graphInEdges, int graphInDegree, Graph* pattern, Match* match, int rank) {
     if (matchContains(graphNode, match)) {
@@ -113,7 +93,7 @@ bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int g
         int patternNeigh = pattern->outEdges[patternNode][i];
         int graphNeigh = match->matchedNodes[patternNeigh];
         if (patternNeigh <= match->matchedNodesCount &&
-        	!contains(graphOutEdges, graphOutDegree, graphNeigh)) {
+        	!arrayContains(graphOutEdges, graphOutDegree, graphNeigh)) {
             return false;
         }
     }
@@ -122,7 +102,7 @@ bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int g
 		int patternNeigh = pattern->inEdges[patternNode][i];
 		int graphNeigh = match->matchedNodes[patternNeigh];
 		if (patternNeigh <= match->matchedNodesCount &&
-			!contains(graphInEdges, graphInDegree, graphNeigh)) {
+			!arrayContains(graphInEdges, graphInDegree, graphNeigh)) {
 			return false;
 		}
     }
@@ -190,6 +170,7 @@ void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Mat
         match->matchedNodesCount--;
         return;
     }
+
     int freeParent = 0;
     int nextPatternNode = pattern->ordering[match->matchedNodesCount + 1];
     int nextPatternNodeParent = pattern->parents[abs(nextPatternNode)];
@@ -299,7 +280,7 @@ int compare (const void * a, const void * b) {
 	return node1->val - node2->val;
 }
 
-int int_compare(const void *a, const void *b) {
+int intCompare(const void *a, const void *b) {
     int *val1 = (int *)a;
     int *val2 = (int *)b;
     return (*val1) - (*val2);
@@ -460,7 +441,7 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 		l++;
 	}
 	g->nodesMapping[0] = -1;
-	qsort(g->nodesMapping, g->nodesCount + 1, sizeof(int), int_compare);
+	qsort(g->nodesMapping, g->nodesCount + 1, sizeof(int), intCompare);
 
 	g->outDegrees = safeMalloc((nodesCount + 1) * sizeof(int));
 	g->outEdges = safeMalloc((nodesCount + 1) * sizeof(int*));
@@ -540,18 +521,17 @@ void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank
 	free(counters);
 }
 
-void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern, int ** nodeProcMap, int * patternSize, FILE **outFile, double startTime) {
+void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, Graph ** pattern, int ** nodeProcMap, int * patternSize, FILE **outFile) {
 	int nodesCount;
 	if (rank == ROOT) {
+		double startDistTime = MPI_Wtime();
 		FILE *inFile;
 		checkArgs(argc, argv, &inFile, outFile);
 		NodeInfo * nodeInfo = preprocessGraph(inFile, &nodesCount);
 		ProcInfo * procInfo = assignNodesToProcesses(nodesCount, procNum, nodeInfo, nodeProcMap);
 		// Brodcast node --> process mapping
-		printf("Node assign time: %f\n", MPI_Wtime() - startTime);
 		MPI_Bcast(&nodesCount, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
 		MPI_Bcast(*nodeProcMap, nodesCount + 1, MPI_INT, ROOT, MPI_COMM_WORLD);
-		printf("Proc map brodcast time: %f\n", MPI_Wtime() - startTime);
 		// Distribute pattern
 		*pattern = readGraph(inFile);
 		*patternSize = (*pattern)->nodesCount;
@@ -566,12 +546,10 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 		free(*nodeProcMap);
 		fclose(inFile);
 
-		// Check if all processes ends - TO REMOVE!!!
-		printf("Graph sent time: %f\n", MPI_Wtime() - startTime);
 		for (int i = 1; i <= procNum - 1; i++) {
 			MPI_Recv(NULL, 0, MPI_INT, MPI_ANY_SOURCE, MPI_END_DISTRIBUTION, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
 		}
-		printf("Distribution time: %f\n", MPI_Wtime() - startTime);
+		printf("Distribution time[s]: %d\n", (int)(MPI_Wtime() - startDistTime));
 	} else {
 		// Receive node --> process mapping
 		MPI_Bcast(&nodesCount, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
@@ -590,8 +568,9 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 	}
 }
 
-void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nodeProcMap, int patternSize, FILE * outFile, double startTime) {
+void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nodeProcMap, int patternSize, FILE * outFile) {
 	if (rank == ROOT) {
+		double startComputationTime = MPI_Wtime();
 		int flag;
 		int * match = malloc((patternSize + 1) * sizeof(int));
 		int endProcesses = 0;
@@ -613,9 +592,12 @@ void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nod
 		for (int i = 1; i < procNum; i++) {
 			MPI_Send(NULL, 0, MPI_INT, i, MPI_END, MPI_COMM_WORLD);
 		}
-		printf("Computation time: %f\n", MPI_Wtime() - startTime);
+		printf("Computations time[s]: %d\n", (int)(MPI_Wtime() - startComputationTime));
 	} else {
 		findMatches(graph, pattern, nodeProcMap, rank);
+		freeGraph(graph);
+		free(pattern);
+		free(nodeProcMap);
 	}
 }
 
@@ -627,13 +609,9 @@ int main(int argc, char* argv[]) {
     Graph * pattern, * graph;
     int * nodeProcMap;
     int patternSize;
-    double startTime;
     FILE * outFile;
-    if (rank == ROOT) {
-    	startTime = MPI_Wtime();
-    }
-    distribiute(argc, argv, rank, procNum, &graph, &pattern, &nodeProcMap, &patternSize, &outFile, startTime);
-    matchNodes(rank, procNum, graph, pattern, nodeProcMap, patternSize, outFile, startTime);
+    distribiute(argc, argv, rank, procNum, &graph, &pattern, &nodeProcMap, &patternSize, &outFile);
+    matchNodes(rank, procNum, graph, pattern, nodeProcMap, patternSize, outFile);
     MPI_Finalize();
     return 0;
 }

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
+#include <stdbool.h>
 #include <mpi.h>
 
 bool isLineEmpty(char* line) {
@@ -40,4 +41,13 @@ int findIndex(int * tab, int len, int val) {
 		return left;
 	}
 	return -1;
+}
+
+bool arrayContains(int * tab, int len, int val) {
+    for (int i = 0; i < len; i++) {
+        if (tab[i] == val) {
+            return true;
+        }
+    }
+    return false;
 }

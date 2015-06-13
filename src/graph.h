@@ -15,7 +15,6 @@ typedef struct {
 } Graph;
 
 Graph* readGraph(FILE* file);
-void printGraph(Graph* g);
 void freeGraph(Graph *g);
 
 #endif

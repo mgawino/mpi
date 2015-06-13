@@ -4,43 +4,6 @@
 #include "graph.h"
 #include "utils.h"
 
-void printGraph(Graph* g) {
-    printf("Graph: %d nodes\n", g->nodesCount);
-    for (int i = 1; i <= g->nodesCount; i++) {
-		printf("Node %d --> [%d]: ", i, g->outDegrees[i]);
-		for (int j = 0; j < g->outDegrees[i]; j++) {
-			printf("%d ", g->outEdges[i][j]);
-		}
-		printf("\n");
-		printf("Node %d <-- [%d]: ", i, g->inDegrees[i]);
-		for (int j = 0; j < g->inDegrees[i]; j++) {
-			printf("%d ", g->inEdges[i][j]);
-		}
-		printf("\n");
-	}
-    if (g->parents != NULL) {
-    	printf("Graph parents:\n");
-    	for (int i = 1; i <= g->nodesCount; i++) {
-    		printf("%d ", g->parents[i]);
-    	}
-    	printf("\n");
-    }
-    if (g->ordering != NULL) {
-		printf("Graph ordering:\n");
-		for (int i = 1; i <= g->nodesCount; i++) {
-			printf("%d ", g->ordering[i]);
-		}
-		printf("\n");
-    }
-    if (g->nodesMapping != NULL) {
-		printf("Graph nodesMapping:\n");
-		for (int i = 1; i <= g->nodesCount; i++) {
-			printf("%d ", g->nodesMapping[i]);
-		}
-		printf("\n");
-	}
-}
-
 int dfs(int node, int nodeParent, int nextId, Graph* graph, int* numbering, bool viaReverseEdge) {
     int currentId = nextId;
     numbering[node] = viaReverseEdge ? -currentId : currentId;

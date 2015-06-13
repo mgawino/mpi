@@ -6,5 +6,6 @@
 bool isLineEmpty(char* line);
 void * safeMalloc(int size);
 int findIndex(int * tab, int len, int val);
+bool arrayContains(int * tab, int len, int val);
 
 #endif
