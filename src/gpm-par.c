@@ -77,12 +77,12 @@ void writeMatch(int * match, int len, FILE * outFile) {
 }
 
 bool matchContains(int node, Match* match) {
-    for (int i = 1; i <= match->matchedNodesCount; i++) {
-       if (match->matchedNodes[i] == node) {
-           return true;
-       }
-    }
-    return false;
+	for (int i = 1; i <= MAX_MATCH_SIZE; i++) {
+		if (match->matchedNodes[i] == node) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int graphOutDegree,
@@ -187,6 +187,7 @@ void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Mat
     int nextPatternNodeParent = pattern->parents[abs(nextPatternNode)];
     int nextGraphNodeParent = match.matchedNodes[nextPatternNodeParent];
     int nextGraphNodeParentIndex = findIndex(graph->nodesMapping, graph->nodesCount, nextGraphNodeParent);
+
     int * parentEdges;
     int parentEdgesCount;
     if (nextGraphNodeParentIndex == -1) {
@@ -316,7 +317,7 @@ ProcInfo * assignNodesToProcesses(int nodesCount, int procNum, NodeInfo * nodeIn
 	int i = 1;
 	while (i <= nodesCount) {
 		int node = nodeComp[i-1].node;
-		if (nodeComp[i-1].val * 8 + 8 < procInfo[proc].memory) {
+		if ((nodeComp[i-1].val * 8 + 8) < procInfo[proc].memory) {
 			(*nodeProcMap)[node] = proc;
 			procInfo[proc].memory -= (nodeComp[i-1].val * 8 + 8);
 			if (nodeInfo[node].outDegree > 0) {
