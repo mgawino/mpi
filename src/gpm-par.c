@@ -7,22 +7,23 @@
 #include <assert.h>
 #include "graph.h"
 #include "utils.h"
+#include <assert.h>
 
 #define ROOT 0
 #define MAX_MATCH_SIZE 10
 
 #define MPI_PROC_IN_OUT_INFO 70
-#define MPI_NODE_IN_OUT_INFO 71
-#define MPI_NODE_OUT_NEIGH 72
-#define MPI_NODE_IN_INFO 73
-#define MPI_NODE_IN_NEIGH 74
-#define MPI_END_DISTRIBUTION 75
-#define MPI_END_COMPUTATION 76
-#define MPI_MATCH_FOUND 77
-#define MPI_ASK 78
-#define MPI_ASKED_OUT 79
-#define MPI_ASKED_IN 80
-#define MPI_END 81
+#define MPI_NODE_IN_OUT_INFO 80
+#define MPI_NODE_OUT_NEIGH 90
+#define MPI_NODE_IN_INFO 100
+#define MPI_NODE_IN_NEIGH 110
+#define MPI_END_DISTRIBUTION 120
+#define MPI_END_COMPUTATION 130
+#define MPI_MATCH_FOUND 140
+#define MPI_ASK 150
+#define MPI_ASKED_OUT 160
+#define MPI_ASKED_IN 170
+#define MPI_END 180
 
 typedef struct {
     int matchedNodesCount;
@@ -118,6 +119,7 @@ void trySendEdges(Graph * graph) {
 		// graphNode, 1 - all edges, 2 - out edges, 3 - in edges
 		MPI_Recv(info, 2, MPI_INT, status.MPI_SOURCE, MPI_ASK, MPI_COMM_WORLD, MPI_STATUSES_IGNORE);
 		int graphNodeIndex = findIndex(graph->nodesMapping, graph->nodesCount, info[0]);
+		assert(graphNodeIndex != -1);
 		MPI_Request request = MPI_REQUEST_NULL;
 		if (info[1] == 1 || info[1] == 2) {
 			MPI_Isend(graph->outEdges[graphNodeIndex], graph->outDegrees[graphNodeIndex],
@@ -212,6 +214,7 @@ void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Mat
         freeEdges = 0;
         if (nextGraphNodeProc == rank) {
         	int graphNodeIndex = findIndex(graph->nodesMapping, graph->nodesCount, nextGraphNode);
+        	assert(graphNodeIndex != -1);
         	graphOutEdges = graph->outEdges[graphNodeIndex];
         	graphOutDegree = graph->outDegrees[graphNodeIndex];
         	graphInEdges = graph->inEdges[graphNodeIndex];
@@ -469,6 +472,7 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 		*outNodes += outDegree;
 		*inNodes += inDegree;
 		int nodeIndex = findIndex(g->nodesMapping, g->nodesCount, node);
+		assert(nodeIndex != -1);
 		g->outDegrees[nodeIndex] = outDegree;
 		g->outEdges[nodeIndex] = safeMalloc(outDegree * sizeof(int));
 
@@ -488,6 +492,7 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 		int node = nodeInInfo[0];
 		int inDegree = nodeInInfo[1];
 		int nodeIndex = findIndex(g->nodesMapping, g->nodesCount, node);
+		assert(nodeIndex != -1);
 		g->outDegrees[nodeIndex] = 0;
 		g->outEdges[nodeIndex] = NULL;
 		if (inDegree > 0) {
@@ -503,7 +508,7 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 }
 
 void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank) {
-	int * nodeInInfo = safeMalloc(outNodes * 2 * sizeof(int));
+	int * nodeInInfo = safeMalloc((outNodes + 1) * 2 * sizeof(int));
 	int msgCounter = 0;
 	MPI_Request request;
 	for (int i = 1; i <= g->nodesCount; i++) {
@@ -511,7 +516,8 @@ void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank
 		for (int j = 0; j < g->outDegrees[i]; j++) {
 			nodeInInfo[msgCounter] = g->outEdges[i][j];
 			nodeInInfo[msgCounter + 1] = node;
-			// Sending outNode, node, rank
+			// Sending outNode, node
+			assert(msgCounter <= (outNodes * 2));
 			MPI_Isend(nodeInInfo + msgCounter, 2, MPI_INT, nodeProcMap[g->outEdges[i][j]], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
 			MPI_Request_free(&request);
 			msgCounter += 2;
@@ -521,9 +527,11 @@ void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank
 	memset(counters, 0, (g->nodesCount + 1) * sizeof(int));
 	// Receiving input edges
 	int result[2];
+	MPI_Status status;
 	for (int i = 0; i < inNodes; i++) {
-		MPI_Recv(&result, 2, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(result, 2, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &status);
 		int source = findIndex(g->nodesMapping, g->nodesCount, result[0]);
+		assert(source != -1);
 		g->inEdges[source][counters[source]++] = result[1];
 	}
 	free(nodeInInfo);
@@ -605,7 +613,7 @@ void matchNodes(int rank, int procNum, Graph * graph, Graph * pattern, int * nod
 	} else {
 		findMatches(graph, pattern, nodeProcMap, rank);
 		freeGraph(graph);
-		free(pattern);
+		freeGraph(pattern);
 		free(nodeProcMap);
 	}
 }
