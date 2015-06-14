@@ -68,10 +68,11 @@ void checkArgs(int argc, char* argv[], FILE ** inFile, FILE ** outFile) {
 }
 
 void writeMatch(int * match, int len, FILE * outFile) {
-	for (int i = 1; i < len; i++) {
-		fprintf(outFile, "%d ", match[i]);
+	fprintf(outFile, "%d", match[1]);
+	for (int i = 2; i <= len; i++) {
+		fprintf(outFile, " %d", match[i]);
 	}
-	fprintf(outFile, "%d\n", match[len]);
+	fprintf(outFile, "\n");
 }
 
 bool matchContains(int node, Match* match) {
@@ -92,7 +93,7 @@ bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int g
     for (int i = 0; i < pattern->outDegrees[patternNode]; i++) {
         int patternNeigh = pattern->outEdges[patternNode][i];
         int graphNeigh = match->matchedNodes[patternNeigh];
-        if (patternNeigh <= match->matchedNodesCount &&
+        if (graphNeigh > -1 &&
         	!arrayContains(graphOutEdges, graphOutDegree, graphNeigh)) {
             return false;
         }
@@ -101,7 +102,7 @@ bool checkNodeMatches(int graphNode, int patternNode, int * graphOutEdges, int g
     for (int i = 0; i < pattern->inDegrees[patternNode]; i++) {
 		int patternNeigh = pattern->inEdges[patternNode][i];
 		int graphNeigh = match->matchedNodes[patternNeigh];
-		if (patternNeigh <= match->matchedNodesCount &&
+		if (graphNeigh > -1 &&
 			!arrayContains(graphInEdges, graphInDegree, graphNeigh)) {
 			return false;
 		}
@@ -163,18 +164,26 @@ void askForEdges(Graph * graph, int * info, int proc, int ** graphOutEdges, int 
 	}
 }
 
-void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Match * match) {
-    if (match->matchedNodesCount == pattern->nodesCount) {
-    	MPI_Send(match->matchedNodes, match->matchedNodesCount + 1, MPI_INT, ROOT, MPI_MATCH_FOUND, MPI_COMM_WORLD);
-    	match->matchedNodes[match->matchedNodesCount] = -1;
-        match->matchedNodesCount--;
+Match addNode(int node, int patternNode, Match* match) {
+    Match m;
+    for (int i = 0; i <= MAX_MATCH_SIZE; i++) {
+        m.matchedNodes[i] = match->matchedNodes[i];
+    }
+    m.matchedNodes[patternNode] = node;
+    m.matchedNodesCount = match->matchedNodesCount + 1;
+    return m;
+}
+
+void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Match match) {
+    if (match.matchedNodesCount == pattern->nodesCount) {
+    	MPI_Send(match.matchedNodes, match.matchedNodesCount + 1, MPI_INT, ROOT, MPI_MATCH_FOUND, MPI_COMM_WORLD);
         return;
     }
 
     int freeParent = 0;
-    int nextPatternNode = pattern->ordering[match->matchedNodesCount + 1];
+    int nextPatternNode = pattern->ordering[match.matchedNodesCount + 1];
     int nextPatternNodeParent = pattern->parents[abs(nextPatternNode)];
-    int nextGraphNodeParent = match->matchedNodes[nextPatternNodeParent];
+    int nextGraphNodeParent = match.matchedNodes[nextPatternNodeParent];
     int nextGraphNodeParentIndex = findIndex(graph->nodesMapping, graph->nodesCount, nextGraphNodeParent);
     int * parentEdges;
     int parentEdgesCount;
@@ -215,9 +224,9 @@ void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Mat
         	askForEdges(graph, info, nextGraphNodeProc, &graphOutEdges, &graphOutDegree, &graphInEdges, &graphInDegree, rank);
         }
         if (checkNodeMatches(nextGraphNode, abs(nextPatternNode), graphOutEdges,
-        					 graphOutDegree, graphInEdges, graphInDegree, pattern, match, rank)) {
-        	match->matchedNodes[++match->matchedNodesCount] = nextGraphNode;
-            exploreMatch(graph, pattern, nodeProcMap, rank, match);
+        					 graphOutDegree, graphInEdges, graphInDegree, pattern, &match, rank)) {
+        	Match newMatch = addNode(nextGraphNode, abs(nextPatternNode), &match);
+            exploreMatch(graph, pattern, nodeProcMap, rank, newMatch);
         }
         if (freeEdges) {
         	free(graphOutEdges);
@@ -227,8 +236,6 @@ void exploreMatch(Graph* graph, Graph* pattern, int * nodeProcMap, int rank, Mat
     if (freeParent) {
     	free(parentEdges);
     }
-    match->matchedNodes[match->matchedNodesCount] = -1;
-    match->matchedNodesCount--;
 }
 
 void findMatches(Graph *graph, Graph* pattern, int * nodeProcMap, int rank) {
@@ -237,7 +244,7 @@ void findMatches(Graph *graph, Graph* pattern, int * nodeProcMap, int rank) {
 		memset(match.matchedNodes, -1, (MAX_MATCH_SIZE + 1) * sizeof(int));
 		match.matchedNodesCount = 1;
 		match.matchedNodes[1] = graph->nodesMapping[i];
-		exploreMatch(graph, pattern, nodeProcMap, rank, &match);
+		exploreMatch(graph, pattern, nodeProcMap, rank, match);
 	}
 	int end = 0;
 	MPI_Request request;
