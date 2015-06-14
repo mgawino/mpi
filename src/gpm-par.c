@@ -437,6 +437,8 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 	int nodesWithOutEdges = procInOutInfo[0];
 	int nodesCount = procInOutInfo[1];
 
+	g->ordering = NULL;
+	g->parents = NULL;
 	g->nodesCount = nodesCount;
 	g->nodesMapping = safeMalloc((nodesCount + 1) * sizeof(int));
 	int k = 1, l = 1;
