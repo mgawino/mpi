@@ -430,10 +430,10 @@ void distribiuteGraph(FILE * file, int *nodeProcMap, NodeInfo * nodeInfo, ProcIn
 	}
 }
 
-Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) {
+Graph * gatherGraph(int * inNodesToReceive, int * outNodesToSend, int * nodeProcMap, int rank) {
 	Graph * g = safeMalloc(sizeof(Graph));
-	*inNodes = 0;
-	*outNodes = 0;
+	*inNodesToReceive = 0;
+	*outNodesToSend = 0;
 	int procInOutInfo[2];
 	// Receiving: nodesWithOutEdges, nodesCount
 	MPI_Recv(procInOutInfo, 2, MPI_INT, ROOT, MPI_PROC_IN_OUT_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -468,9 +468,9 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 		int node = nodeInOutInfo[0];
 		int outDegree = nodeInOutInfo[1];
 		int inDegree = nodeInOutInfo[2];
+		*inNodesToReceive += inDegree;
+		*outNodesToSend += outDegree;
 
-		*outNodes += outDegree;
-		*inNodes += inDegree;
 		int nodeIndex = findIndex(g->nodesMapping, g->nodesCount, node);
 		assert(nodeIndex != -1);
 		g->outDegrees[nodeIndex] = outDegree;
@@ -482,7 +482,13 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 		} else {
 			g->inEdges[nodeIndex] = NULL;
 		}
-		MPI_Recv(g->outEdges[nodeIndex], nodeInOutInfo[1], MPI_INT, ROOT, MPI_NODE_OUT_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(g->outEdges[nodeIndex], outDegree, MPI_INT, ROOT, MPI_NODE_OUT_NEIGH, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		for (int i = 0; i < outDegree; i++) {
+			if (nodeProcMap[g->outEdges[nodeIndex][i]] == rank) {
+				(*outNodesToSend)--;
+				(*inNodesToReceive)--;
+			}
+		}
 	}
 	// Receiving info about nodes without output edges
 	int nodeInInfo[2];
@@ -502,33 +508,40 @@ Graph * gatherGraph(int * inNodes, int * outNodes, int * nodeProcMap, int rank) 
 			g->inDegrees[nodeIndex] = 0;
 			g->inEdges[nodeIndex] = NULL;
 		}
-		*inNodes += inDegree;
+		*inNodesToReceive += inDegree;
 	}
 	return g;
 }
 
-void transpose(Graph * g, int * nodeProcMap, int inNodes, int outNodes, int rank) {
-	int * nodeInInfo = safeMalloc((outNodes + 1) * 2 * sizeof(int));
+void transpose(Graph * g, int * nodeProcMap, int inNodesToReceive, int outNodesToSend, int rank) {
+	int * nodeInInfo = safeMalloc((outNodesToSend + 1) * 2 * sizeof(int));
 	int msgCounter = 0;
 	MPI_Request request;
+	int * counters = safeMalloc((g->nodesCount + 1) * sizeof(int));
+	memset(counters, 0, (g->nodesCount + 1) * sizeof(int));
 	for (int i = 1; i <= g->nodesCount; i++) {
 		int node = g->nodesMapping[i];
 		for (int j = 0; j < g->outDegrees[i]; j++) {
-			nodeInInfo[msgCounter] = g->outEdges[i][j];
-			nodeInInfo[msgCounter + 1] = node;
-			// Sending outNode, node
-			assert(msgCounter <= (outNodes * 2));
-			MPI_Isend(nodeInInfo + msgCounter, 2, MPI_INT, nodeProcMap[g->outEdges[i][j]], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
-			MPI_Request_free(&request);
-			msgCounter += 2;
+			int neigh = g->outEdges[i][j];
+			if (nodeProcMap[neigh] == rank) {
+				int source = findIndex(g->nodesMapping, g->nodesCount, neigh);
+				assert(source != -1);
+				g->inEdges[source][counters[source]++] = node;
+			} else {
+				nodeInInfo[msgCounter] = neigh;
+				nodeInInfo[msgCounter + 1] = node;
+				// Sending outNode, node
+				assert(msgCounter <= (outNodesToSend * 2));
+				MPI_Isend(nodeInInfo + msgCounter, 2, MPI_INT, nodeProcMap[neigh], MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &request);
+				MPI_Request_free(&request);
+				msgCounter += 2;
+			}
 		}
 	}
-	int * counters = safeMalloc((g->nodesCount + 1) * sizeof(int));
-	memset(counters, 0, (g->nodesCount + 1) * sizeof(int));
 	// Receiving input edges
 	int result[2];
 	MPI_Status status;
-	for (int i = 0; i < inNodes; i++) {
+	for (int i = 0; i < inNodesToReceive; i++) {
 		MPI_Recv(result, 2, MPI_INT, MPI_ANY_SOURCE, MPI_NODE_IN_NEIGH, MPI_COMM_WORLD, &status);
 		int source = findIndex(g->nodesMapping, g->nodesCount, result[0]);
 		assert(source != -1);
@@ -575,9 +588,9 @@ void distribiute(int argc, char *argv[], int rank, int procNum, Graph ** graph, 
 		// Receive pattern
 		*pattern = gatherPattern();
 		// Receive graph
-		int inNodes, outNodes;
-		*graph = gatherGraph(&inNodes, &outNodes, *nodeProcMap, rank);
-		transpose(*graph, *nodeProcMap, inNodes, outNodes, rank);
+		int inNodesToReceive, outNodesToSend;
+		*graph = gatherGraph(&inNodesToReceive, &outNodesToSend, *nodeProcMap, rank);
+		transpose(*graph, *nodeProcMap, inNodesToReceive, outNodesToSend, rank);
 		// Receive end of distribution
 		MPI_Request request;
 		MPI_Isend(NULL, 0, MPI_INT, ROOT, MPI_END_DISTRIBUTION, MPI_COMM_WORLD, &request);
